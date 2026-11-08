@@ -20,6 +20,9 @@ ARG TARGETARCH
 ARG VERSION
 ARG SHA256_AMD64
 ARG SHA256_ARM64
+# curl, not busybox wget: the first CI run got a 504 from GitHub's release CDN and
+# wget makes one attempt. curl retries, and gives up loudly instead of hanging.
+RUN apk add --no-cache curl
 WORKDIR /out
 RUN set -eu; \
     case "$TARGETARCH" in \
@@ -27,11 +30,13 @@ RUN set -eu; \
       arm64) asset=arm64;  sum="$SHA256_ARM64" ;; \
       *) echo "no Warren release for $TARGETARCH" >&2; exit 1 ;; \
     esac; \
+    get() { curl -fsSL --retry 5 --retry-delay 3 --retry-all-errors \
+              --connect-timeout 20 --max-time 180 -o "$2" "$1"; }; \
     base="https://github.com/doedja/warren/releases/download/v${VERSION}"; \
-    wget -q -O warren.tar.gz "${base}/warren-v${VERSION}-linux-${asset}.tar.gz"; \
+    get "${base}/warren-v${VERSION}-linux-${asset}.tar.gz" warren.tar.gz; \
     echo "${sum}  warren.tar.gz" | sha256sum -c -; \
     tar -xzf warren.tar.gz warren; \
-    wget -q -O LICENSE "https://raw.githubusercontent.com/doedja/warren/v${VERSION}/LICENSE"; \
+    get "https://raw.githubusercontent.com/doedja/warren/v${VERSION}/LICENSE" LICENSE; \
     rm warren.tar.gz
 
 FROM scratch
