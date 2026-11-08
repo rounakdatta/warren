@@ -1,0 +1,58 @@
+name: Image
+
+# A v<VERSION> tag publishes ghcr.io/<owner>/warren:<VERSION> for amd64 and
+# arm64. A manual run builds the same image and pushes nothing, which is the
+# way to check a Dockerfile edit before tagging.
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions: {}
+
+jobs:
+  image:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      # Actions are pinned to commits, not tags: this job holds a token that can
+      # publish packages, and a moved tag would run someone else's code with it.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: The tag must name the release the Dockerfile pins
+        if: startsWith(github.ref, 'refs/tags/')
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          grep -qx "ARG VERSION=${TAG#v}" Dockerfile \
+            || { echo "::error::tag ${TAG} does not match ARG VERSION in the Dockerfile"; exit 1; }
+
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+
+      - name: Log in to GHCR
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550 # v4.8.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - id: meta
+        uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
+        with:
+          images: ghcr.io/${{ github.repository }}
+          tags: type=semver,pattern={{version}}
+
+      - uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: ${{ startsWith(github.ref, 'refs/tags/') }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          # No attestation manifests: they add "unknown/unknown" entries to the
+          # index, and this image has nothing to attest beyond the pinned sums.
+          provenance: false
+          sbom: false
