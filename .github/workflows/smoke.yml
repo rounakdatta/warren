@@ -1,0 +1,60 @@
+name: Smoke (external)
+
+# Looks at the public Warren endpoint from a GitHub-hosted runner, which is the
+# one vantage point the homelab cannot give itself: a pod's request for the
+# public name hairpins through kube-proxy, so from inside it can never prove
+# what a stranger on the internet sees.
+#
+# No credentials: it checks that the door is where it should be, locked, and the
+# only one. Prints yes/no and never an address or a port, because this log is
+# public.
+on:
+  workflow_dispatch:
+    inputs:
+      host:
+        description: 'The public name'
+        required: false
+        default: 'pxin.taptappers.club'
+        type: string
+
+permissions: {}
+
+jobs:
+  smoke:
+    runs-on: ubuntu-latest
+    env:
+      HOST: ${{ inputs.host }}
+    steps:
+      - name: Probe from outside
+        run: |
+          set -u
+          fail=0
+          yn() { if eval "$2"; then echo "yes  $1"; else echo "NO   $1"; fail=1; fi; }
+
+          addr=$(getent ahostsv4 "$HOST" | awk 'NR==1 {print $1}')
+          yn "the name resolves to a public address" \
+            '[ -n "$addr" ] && ! printf %s "$addr" | grep -Eq "^(10\.|127\.|192\.168\.|172\.(1[6-9]|2[0-9]|3[01])\.|100\.(6[4-9]|[7-9][0-9]|1[01][0-9]|12[0-7])\.|169\.254\.)"'
+
+          # curl validates the certificate unless told not to, so a 407 here also
+          # means the chain is good and the name matches.
+          code=$(curl -s -o /dev/null -m 20 -w '%{http_connect}' -x "https://$HOST:443" https://example.com/ || true)
+          yn "a stranger is answered 407 (proxy login required), over valid TLS" '[ "$code" = 407 ]'
+
+          cert=$(echo | openssl s_client -connect "$HOST:443" -servername "$HOST" 2>/dev/null | openssl x509 -noout -enddate 2>/dev/null | cut -d= -f2)
+          days=$(( ( $(date -d "$cert" +%s 2>/dev/null || echo 0) - $(date +%s) ) / 86400 ))
+          yn "the certificate has more than 30 days left" '[ "$days" -gt 30 ]'
+
+          alpn=$(echo | openssl s_client -connect "$HOST:443" -servername "$HOST" -alpn h2,http/1.1 2>/dev/null | sed -n 's/^ALPN protocol: //p')
+          yn "HTTP/2 is not offered to proxy clients" '[ "$alpn" = "http/1.1" ]'
+
+          # By address, with no name to match, there is no proxy to find.
+          bare=$(curl -s -o /dev/null -m 20 -w '%{http_connect}' --proxy-insecure -x "https://$addr:443" https://example.com/ || true)
+          yn "the address alone does not reach the proxy" '[ "$bare" != 407 ]'
+
+          open=0
+          for p in 7000 8000 9000; do
+            if timeout 6 bash -c ">/dev/tcp/$HOST/$p" 2>/dev/null; then open=$((open + 1)); fi
+          done
+          yn "no other Warren port is reachable from outside" '[ "$open" = 0 ]'
+
+          exit $fail
